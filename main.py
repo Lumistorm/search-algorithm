@@ -1,146 +1,30 @@
 import networkx as nx
 import matplotlib.pyplot as plt
+import heapq
 from collections import deque, Counter
-import random
+from itertools import count
 
 
-def random_network(node_count, min_neighbors=2, max_neighbors=6):
-    if min_neighbors < 2:
-        raise ValueError("min_neighbors must be at least 2")
-
-    if max_neighbors < min_neighbors:
-        raise ValueError("max_neighbors must be >= min_neighbors")
-
-    if node_count < min_neighbors + 1:
-        raise ValueError("Not enough nodes")
-
-    G = nx.Graph()
-
-    positions = {
-        node: (random.random(), random.random())
-        for node in range(node_count)
-    }
-
-    nx.set_node_attributes(G, positions, "pos")
-    G.add_nodes_from(range(node_count))
-
-    def distance(a, b):
-        ax, ay = positions[a]
-        bx, by = positions[b]
-        return (ax - bx) ** 2 + (ay - by) ** 2
-
-    distances = {
-        node: sorted(
-            (other for other in range(node_count) if other != node),
-            key=lambda other: distance(node, other)
+def random_geometric_network(
+    node_count=100,
+    radius=0.2
+):
+    while True:
+        G = nx.random_geometric_graph(
+            node_count,
+            radius=radius,
+            dim=2,
+            p=2
         )
-        for node in range(node_count)
-    }
 
-    # Build a connected geometric backbone.
-    remaining = set(range(node_count))
-    connected = {0}
-    remaining.remove(0)
-
-    while remaining:
-        best = None
-
-        for node in remaining:
-            for other in connected:
-                d = distance(node, other)
-
-                if best is None or d < best[0]:
-                    best = (d, node, other)
-
-        _, node, other = best
-
-        if G.degree[node] < max_neighbors and G.degree[other] < max_neighbors:
-            G.add_edge(node, other)
-            connected.add(node)
-            remaining.remove(node)
-        else:
-            # Find another nearby connection.
-            candidates = sorted(
-                (
-                    (distance(node, other), node, other)
-                    for other in connected
-                    if G.degree[other] < max_neighbors
-                )
-            )
-
-            if not candidates:
-                raise RuntimeError("Could not construct network")
-
-            _, node, other = candidates[0]
-            G.add_edge(node, other)
-            connected.add(node)
-            remaining.remove(node)
-
-    # Add short geometric edges until every node has min_neighbors.
-    changed = True
-
-    while changed:
-        changed = False
-
-        for node in list(G.nodes):
-            while G.degree[node] < min_neighbors:
-                candidates = [
-                    other
-                    for other in distances[node]
-                    if (
-                        other != node
-                        and not G.has_edge(node, other)
-                        and G.degree[other] < max_neighbors
-                    )
-                ]
-
-                if not candidates:
-                    raise RuntimeError(
-                        "Could not satisfy min_neighbors with max_neighbors"
-                    )
-
-                other = candidates[0]
-                G.add_edge(node, other)
-                changed = True
-
-    # Add additional nearby edges randomly.
-    candidates = []
-
-    for a in G:
-        for b in distances[a]:
-            if a >= b:
-                continue
-
-            if G.has_edge(a, b):
-                continue
-
-            if G.degree[a] >= max_neighbors:
-                continue
-
-            if G.degree[b] >= max_neighbors:
-                continue
-
-            candidates.append((distance(a, b), a, b))
-
-    random.shuffle(candidates)
-    candidates.sort()
-
-    for _, a, b in candidates:
-        if G.degree[a] >= max_neighbors:
-            continue
-
-        if G.degree[b] >= max_neighbors:
-            continue
-
-        if random.random() < 0.35:
-            G.add_edge(a, b)
-
-    return G
+        if nx.is_connected(G):
+            return G
 
 
-def breadth_first_search(graph, start, end):
+def bfs(graph, start, end):
     explored = set()
     visited = {start}
+
     queue = deque([(start, [start])])
 
     while queue:
@@ -151,54 +35,163 @@ def breadth_first_search(graph, start, end):
             return path, explored
 
         for neighbor in graph.neighbors(node):
-            if neighbor not in visited:
-                visited.add(neighbor)
-                queue.append((neighbor, path + [neighbor]))
+            if neighbor in visited:
+                continue
+
+            visited.add(neighbor)
+
+            if neighbor == end:
+                return path + [neighbor], explored
+            queue.append((neighbor, path + [neighbor]))
 
     return [], explored
 
 
-def custom_search(graph, start, end):
-    pass
+def heuristic_search(graph, start, end):
+    explored = set()
+    visited = {start}
+
+    queue_counter = count()
+
+    # (priority, insertion_order, cost, node, path)
+    queue = [
+        (0, next(queue_counter), 0, start, [start])
+    ]
+
+    while queue:
+        priority, _, cost, node, path = heapq.heappop(queue)
+
+        if node in explored:
+            continue
+
+        explored.add(node)
+
+        if node == end:
+            return path, explored
+
+        neighbors = set(graph.neighbors(node))
+
+        for neighbor in neighbors:
+            if neighbor in visited:
+                continue
+
+            visited.add(neighbor)
+
+            if neighbor == end:
+                return path + [neighbor], explored
+
+            # Direct unexplored opportunities
+            new_cost = cost + 1
+
+            overlap = len(set(graph.neighbors(neighbor)) & set(graph.neighbors(node)))
+
+            unseen = len(set(graph.neighbors(neighbor)) - visited)
+
+            degree = graph.degree[neighbor]
+
+            new_priority = (
+                    new_cost * 2
+                    - unseen * 3
+                    - degree
+                    + overlap
+            )
+
+            heapq.heappush(
+                queue,
+                (
+                    new_priority,
+                    next(queue_counter),
+                    new_cost,
+                    neighbor,
+                    path + [neighbor]
+                )
+            )
+
+    return [], explored
+
+def compare_targets(graph, start=0):
+    results = []
+
+    for target in graph.nodes:
+        if target == start:
+            continue
+
+        bfs_path, bfs_seen = bfs(graph, start, target)
+        h_path, h_seen = heuristic_search(graph, start, target)
+
+        if not bfs_path or not h_path:
+            continue
+
+        bfs_explored = len(bfs_seen)
+        h_explored = len(h_seen)
+
+        results.append({
+            "target": target,
+            "distance": len(bfs_path) - 1,
+            "bfs": bfs_explored,
+            "heuristic": h_explored,
+            "ratio": h_explored / bfs_explored,
+            "bfs_path": len(bfs_path) - 1,
+            "heuristic_path": len(h_path) - 1,
+        })
+
+    results.sort(key=lambda x: x["distance"])
+
+    print("\n===== BY TARGET DISTANCE =====")
+
+    for r in results:
+        print(
+            f"distance={r['distance']:2} "
+            f"target={r['target']:3} "
+            f"BFS={r['bfs']:3} "
+            f"H={r['heuristic']:3} "
+            f"ratio={r['ratio']:.2f} "
+            f"H_path={r['heuristic_path']:2}"
+        )
+
+    print("\n===== SUMMARY BY DISTANCE =====")
+
+    distances = sorted(set(r["distance"] for r in results))
+
+    for distance in distances:
+        group = [
+            r for r in results
+            if r["distance"] == distance
+        ]
+
+        avg_bfs = sum(r["bfs"] for r in group) / len(group)
+        avg_h = sum(r["heuristic"] for r in group) / len(group)
+        avg_ratio = sum(r["ratio"] for r in group) / len(group)
+
+        print(
+            f"distance={distance:2} "
+            f"targets={len(group):2} "
+            f"BFS={avg_bfs:6.2f} "
+            f"H={avg_h:6.2f} "
+            f"ratio={avg_ratio:.2f}"
+        )
 
 
-def main():
-    shortest_count = 0
-    failures = []
-    count = 100
-    efficiency_avg = 0
-    for i in range(count):
-        graph = random_network(20)
-        # graph = nx.gnp_random_graph(100, 0.1)
-        while graph.has_edge(1, 16):
-            graph = random_network(20)
-            # graph = nx.gnp_random_graph(100, 0.1)
-        bfs_path, bfs_explored = breadth_first_search(graph, 1, 16)
-        custom_path, custom_explored = custom_search(graph, 1, 16)
+G = random_geometric_network(
+    node_count=100,
+    radius=0.2
+)
 
-        if len(custom_path) == len(bfs_path):
-            shortest_count += 1
-        else:
-            failures.append(len(custom_path)/len(bfs_path))
+compare_targets(G, 0)
 
-        efficiency_avg += len(custom_explored) / len(bfs_explored)
-
-        print(i, 'breadth first search:', bfs_path, f'explored={len(bfs_explored)}')
-        print(i, 'custom search:', custom_path, f'explored={len(custom_explored)}', f'shortest={'✅' if len(custom_path) == len(bfs_path) else '❌'}')
-    efficiency_avg /= count
-    print(f'shortest path found: {shortest_count}/{count}')
-    print(f'failures: {failures} ratio')
-    print(f'efficiency: {efficiency_avg} ratio')
-
-
-    nx.draw(
-        graph,
-        with_labels=True,
-        node_size=300,
-        width=0.5
-    )
-    plt.show()
-
-
-if __name__ == '__main__':
-    main()
+# pos = nx.spring_layout(G, seed=1)
+#
+# labels = {
+#     node: G.degree[node]
+#     for node in G
+# }
+#
+# nx.draw(
+#     G,
+#     pos=pos,
+#     node_size=100,
+#     labels=labels,
+#     with_labels=True
+# )
+#
+# plt.show()
